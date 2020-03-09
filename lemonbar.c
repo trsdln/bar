@@ -37,8 +37,8 @@ typedef struct font_t {
     int ascent;
 
     int descent, height, width;
-    uint16_t char_max;
-    uint16_t char_min;
+    uint32_t char_max;
+    uint32_t char_min;
 } font_t;
 
 typedef struct monitor_t {
@@ -213,7 +213,7 @@ xcb_void_cookie_t xcb_poly_text_16_simple(xcb_connection_t * c,
     xcb_parts[4].iov_base = xcb_lendelta;
     xcb_parts[4].iov_len = sizeof(xcb_lendelta);
     xcb_parts[5].iov_base = (char *)str;
-    xcb_parts[5].iov_len = len * sizeof(int16_t);
+    xcb_parts[5].iov_len = len * sizeof(uint16_t);
 
     xcb_parts[6].iov_base = 0;
     xcb_parts[6].iov_len = -(xcb_parts[4].iov_len + xcb_parts[5].iov_len) & 3;
@@ -225,7 +225,7 @@ xcb_void_cookie_t xcb_poly_text_16_simple(xcb_connection_t * c,
 
 
 int
-xft_char_width_slot (uint16_t ch)
+xft_char_width_slot (uint32_t ch)
 {
     int slot = ch % MAX_WIDTHS;
     while (xft_char[slot] != 0 && xft_char[slot] != ch)
@@ -235,7 +235,7 @@ xft_char_width_slot (uint16_t ch)
     return slot;
 }
 
-int xft_char_width (uint16_t ch, font_t *cur_font)
+int xft_char_width (uint32_t ch, font_t *cur_font)
 {
     int slot = xft_char_width_slot(ch);
     if (!xft_char[slot]) {
@@ -272,7 +272,7 @@ shift (monitor_t *mon, int x, int align, int ch_width)
             x = mon->width - ch_width;
             break;
     }
-    
+
         /* Draw the background first */
     fill_rect(mon->pixmap, gc[GC_CLEAR], x, 0, ch_width, bh);
     return x;
@@ -296,7 +296,7 @@ draw_shift (monitor_t *mon, int x, int align, int w)
 }
 
 int
-draw_char (monitor_t *mon, font_t *cur_font, int x, int align, uint16_t ch)
+draw_char (monitor_t *mon, font_t *cur_font, int x, int align, uint32_t ch)
 {
     int ch_width;
 
@@ -312,15 +312,17 @@ draw_char (monitor_t *mon, font_t *cur_font, int x, int align, uint16_t ch)
 
     int y = bh / 2 + cur_font->height / 2- cur_font->descent + offsets_y[offset_y_index];
     if (cur_font->xft_ft) {
-        XftDrawString16 (xft_draw, &sel_fg, cur_font->xft_ft, x,y, &ch, 1);
+        XftDrawString32 (xft_draw, &sel_fg, cur_font->xft_ft, x,y, &ch, 1);
     } else {
+        uint16_t ch16 = ch;
+
         /* xcb accepts string in UCS-2 BE, so swap */
-        ch = (ch >> 8) | (ch << 8);
-        
+        ch16 = (ch16 >> 8) | (ch16 << 8);
+
         // The coordinates here are those of the baseline
         xcb_poly_text_16_simple(c, mon->pixmap, gc[GC_DRAW],
                             x, y,
-                            1, &ch);
+                            1, &ch16);
     }
 
     draw_lines(mon, x, ch_width);
@@ -498,7 +500,7 @@ area_add (char *str, const char *optend, char **end, monitor_t *mon, const int x
     }
 
     if (area_stack.at + 1 > area_stack.max) {
-        fprintf(stderr, "Cannot add any more clickable areas (used %d/%d)\n", 
+        fprintf(stderr, "Cannot add any more clickable areas (used %d/%d)\n",
                 area_stack.at, area_stack.max);
         return false;
     }
@@ -539,10 +541,10 @@ area_add (char *str, const char *optend, char **end, monitor_t *mon, const int x
 }
 
 bool
-font_has_glyph (font_t *font, const uint16_t c)
+font_has_glyph (font_t *font, const uint32_t c)
 {
     if (font->xft_ft) {
-        if (XftCharExists(dpy, font->xft_ft, (FcChar32) c)) {
+        if (XftCharExists(dpy, font->xft_ft, c)) {
             return true;
         } else {
             return false;
@@ -560,7 +562,7 @@ font_has_glyph (font_t *font, const uint16_t c)
 }
 
 font_t *
-select_drawable_font (const uint16_t c)
+select_drawable_font (const uint32_t c)
 {
     // If the user has specified a font to use, try that first.
     if (font_index != -1 && font_has_glyph(font_list[font_index - 1], c)) {
@@ -588,6 +590,7 @@ parse (char *text)
     int pos_x, align, button;
     char *p = text, *block_end, *ep;
     rgba_t tmp;
+    size_t textlen = strlen(text);
 
     pos_x = 0;
     align = ALIGN_L;
@@ -707,43 +710,10 @@ parse (char *text)
             p++;
         } else { // utf-8 -> ucs-2
             uint8_t *utf = (uint8_t *)p;
-            uint16_t ucs;
+            uint32_t ucs;
 
-            // ASCII
-            if (utf[0] < 0x80) {
-                ucs = utf[0];
-                p  += 1;
-            }
-            // Two byte utf8 sequence
-            else if ((utf[0] & 0xe0) == 0xc0) {
-                ucs = (utf[0] & 0x1f) << 6 | (utf[1] & 0x3f);
-                p += 2;
-            }
-            // Three byte utf8 sequence
-            else if ((utf[0] & 0xf0) == 0xe0) {
-                ucs = (utf[0] & 0xf) << 12 | (utf[1] & 0x3f) << 6 | (utf[2] & 0x3f);
-                p += 3;
-            }
-            // Four byte utf8 sequence
-            else if ((utf[0] & 0xf8) == 0xf0) {
-                ucs = 0xfffd;
-                p += 4;
-            }
-            // Five byte utf8 sequence
-            else if ((utf[0] & 0xfc) == 0xf8) {
-                ucs = 0xfffd;
-                p += 5;
-            }
-            // Six byte utf8 sequence
-            else if ((utf[0] & 0xfe) == 0xfc) {
-                ucs = 0xfffd;
-                p += 6;
-            }
-            // Not a valid utf-8 sequence
-            else {
-                ucs = utf[0];
-                p += 1;
-            }
+            int len = FcUtf8ToUcs4(utf, &ucs, textlen - (p - text) );
+            p += len;
 
             cur_font = select_drawable_font(ucs);
             if (!cur_font)
@@ -1156,19 +1126,19 @@ xcb_visualid_t
 get_visual (void)
 {
 
-    XVisualInfo xv; 
+    XVisualInfo xv;
     xv.depth = 32;
     int result = 0;
-    XVisualInfo* result_ptr = NULL; 
+    XVisualInfo* result_ptr = NULL;
     result_ptr = XGetVisualInfo(dpy, VisualDepthMask, &xv, &result);
 
     if (result > 0) {
         visual_ptr = result_ptr->visual;
         return result_ptr->visualid;
     }
-    
+
     //Fallback
-    visual_ptr = DefaultVisual(dpy, scr_nbr);	
+    visual_ptr = DefaultVisual(dpy, scr_nbr);
 	return scr->root_visual;
 }
 
@@ -1537,7 +1507,7 @@ main (int argc, char **argv)
 
     // Prevent fgets to block
     fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
-	
+
     for (;;) {
         bool redraw = false;
 
